@@ -1,0 +1,37 @@
+torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 repl/scripts/cli.py \
+    --dataset animals \
+    --spritevid_max_sprites 8 \
+    --spritevid_noise_type gaussian \
+    --spritevid_noise_level 0.1 \
+    --sprite_noise_on_top \
+    --seq_len 32 \
+    --num_sequences 16000 \
+    --encoder conv2d \
+    --use_bn \
+    --enc_n_layers 6 \
+    --enc_kernel_size 5,5 5,5 5,5 5,5 5,5 5,5 \
+    --enc_stride 2,2 2,2 1,1 1,1 1,1 1,1 \
+    --enc_padding 2,2 2,2 2,2 2,2 2,2 2,2 \
+    --enc_output_dim 32 \
+    --flatten_enc_output \
+    --integrator lstm \
+    --ctx_dim 512 \
+    --predictor mlp \
+    --pred_hidden_dim 512 \
+    --pred_steps 1 \
+    --epochs 1000 \
+    --use_scheduler \
+    --lr 3e-4 \
+    --batch_size 128 \
+    --num_workers 0 \
+    --online_task multitask \
+    --online_full_spatial_readout \
+    --online_input ctx \
+    --val_batch_size 128 \
+    --save_online_readout \
+    --offline_task multitask \
+    --offline_input ctx \
+    --offline_batch_size 128 \
+    --offline_epochs 250 \
+    --save_offline_readout \
+    --use_sklearn_regression $@

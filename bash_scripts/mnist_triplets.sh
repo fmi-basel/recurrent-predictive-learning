@@ -1,0 +1,29 @@
+torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 repl/scripts/cli.py \
+    --dataset mnist \
+    --grayscale \
+    --flatten_images \
+    --seq_len 64 \
+    --num_sequences 10000 \
+    --mnist_seqtype triplets \
+    --encoder mlp \
+    --enc_output_dim 64 \
+    --enc_n_layers 2 \
+    --integrator rnn \
+    --ctx_dim 256 \
+    --predictor mlp \
+    --pred_hidden_dim 256 \
+    --pred_steps 1 \
+    --epochs 200 \
+    --batch_size 64 \
+    --lr 3e-4 \
+    --weight_decay 1e-3 \
+    --num_workers 8 \
+    --online_task multitask \
+    --online_input ctx \
+    --val_batch_size 128 \
+    --save_online_readout \
+    --offline_task multitask \
+    --offline_input ctx \
+    --offline_epochs 50 \
+    --offline_batch_size 128 \
+    --save_offline_readout $@

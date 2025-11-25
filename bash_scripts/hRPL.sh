@@ -1,0 +1,37 @@
+torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 repl/scripts/greedy.py \
+    --dataset animals \
+    --spritevid_max_sprites 8 \
+    --spritevid_noise_type gaussian \
+    --spritevid_noise_level 0.1 \
+    --sprite_noise_on_top \
+    --seq_len 32 \
+    --num_sequences 16000 \
+    --n_areas 6 \
+    --area_encoders_kind conv2d \
+    --area_enc_bn \
+    --area_enc_n_layers 1 \
+    --area_enc_kernel_sizes 5,5 5,5 5,5 5,5 5,5 5,5 \
+    --area_enc_strides 2,2 2,2 1,1 1,1 1,1 1,1 \
+    --area_enc_paddings 2,2 2,2 2,2 2,2 2,2 2,2 \
+    --area_enc_dims 32 32 32 32 32 32 \
+    --flatten_area_enc_output \
+    --area_integrators_kind lstm \
+    --area_ctx_dims 512 512 512 512 512 512 \
+    --area_predictors_kind mlp \
+    --area_pred_hidden_dims 512 512 512 512 512 512 \
+    --pred_steps 1 \
+    --epochs 500 \
+    --lr 3e-4 \
+    --batch_size 128 \
+    --num_workers 0 \
+    --online_task multitask \
+    --online_full_spatial_readout \
+    --online_input ctx \
+    --val_batch_size 128 \
+    --save_online_readout \
+    --offline_task multitask \
+    --offline_input ctx \
+    --offline_batch_size 128 \
+    --offline_epochs 250 \
+    --save_offline_readout \
+    --use_sklearn_regression $@

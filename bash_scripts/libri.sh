@@ -1,0 +1,25 @@
+torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 repl/scripts/cli.py \
+    --dataset libri \
+    --seq_len 20480 \
+    --encoder cpc \
+    --use_bn \
+    --enc_output_dim 512 \
+    --integrator lstm \
+    --ctx_dim 256 \
+    --predictor mlp \
+    --pred_hidden_dim 512 \
+    --pred_steps 16 \
+    --epochs 500 \
+    --lr 3e-4 \
+    --batch_size 256 \
+    --num_workers 8 \
+    --weight_decay 0.0 \
+    --online_task seq2label \
+    --online_input ctx \
+    --val_batch_size 256 \
+    --save_online_readout \
+    --offline_task seq2seq \
+    --offline_input ctx \
+    --offline_batch_size 64 \
+    --offline_epochs 50 \
+    --save_offline_readout $@

@@ -1,0 +1,33 @@
+torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 repl/scripts/cli.py \
+    --dataset mouse \
+    --grayscale \
+    --seq_len 25 \
+    --encoder conv2d \
+    --use_bn \
+    --enc_n_layers 6 \
+    --enc_kernel_size 5,5 5,5 5,5 3,3 3,3 3,3 \
+    --enc_stride 2,2 2,2 2,2 1,1 1,1 1,1 \
+    --enc_padding 2,2 2,2 2,2 1,1 1,1 1,1 \
+    --enc_output_dim 32 \
+    --flatten_enc_output \
+    --integrator lstm \
+    --ctx_dim 256 \
+    --predictor mlp \
+    --pred_hidden_dim 256 \
+    --pred_steps 1 \
+    --epochs 500 \
+    --lr 3e-4 \
+    --batch_size 128 \
+    --num_workers 0 \
+    --online_task multitask \
+    --online_full_spatial_readout \
+    --online_input ctx \
+    --val_batch_size 64 \
+    --save_online_readout \
+    --offline_task multitask \
+    --offline_input ctx \
+    --offline_batch_size 64 \
+    --offline_epochs 250 \
+    --offline_optimizer sgd \
+    --use_sklearn_regression \
+    --save_offline_readout $@
