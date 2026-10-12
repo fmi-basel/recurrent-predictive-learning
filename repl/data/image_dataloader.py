@@ -1,11 +1,13 @@
 # credits: https://github.com/loeweX/Greedy_InfoMax
 
+import os
+
 from repl.data.datasets import MouseDataset, MNISTSequencesDataset, PFCOddballImgSequencesDataset
+from repl.data.tlt12_wds import LabeledTraversalWebDataset, TraversalWebDataset, TraversalWebDatasetSubset
 from repl.data.synthetic_sprites_dataset import SpriteVideoDataset
 from repl.data.utils import create_validation_sampler
 import torch
 import torchvision.transforms as transforms
-from torchvision.transforms import transforms
 from torch.utils.data.distributed import DistributedSampler
 
 
@@ -514,4 +516,101 @@ class MouseVideoDataLoader(ImageDataLoader):
                 **self._dataset_kwargs,
             )
         return datasets
+
+
+class TLT12DataLoader(ImageDataLoader):
+    def __init__(
+        self,
+        data_dir,
+        num_workers=16,
+        augmentations={},
+        distributed=False,
+        seed=42,
+        normalize_latents=True,
+    ):
+        data_dir = os.path.join(data_dir, "TLT12", "shards")
+        super(TLT12DataLoader, self).__init__(
+            dataset=TraversalWebDataset,
+            data_dir=data_dir,
+            num_workers=num_workers,
+            distributed=distributed,
+            seed=seed
+        )
+
+        if distributed:
+            raise NotImplementedError("Distributed training not yet supported for TLT12")
+
+        self._train_subset = "train"
+        self._val_subset = "val"
+        self._test_subset = "val"
+        self.sampler = None
+        self.normalize_latents = normalize_latents
+
+        self._webdataset_handler()
+
+    def _webdataset_handler(self):
+        # check if files in data_dir/train/ have a tar.gz extension or a tar extension
+        import os
+
+        train_files = os.listdir(f"{self.data_dir}/train")
+        if any(f.endswith(".tar.gz") for f in train_files):
+            shard_pattern = "shard-*.tar.gz"
+        else:
+            shard_pattern = "shard-*.tar"
+
+        self.train_traversal_dataset = self.dataset(
+            urls=f"{self.data_dir}/train/{shard_pattern}",
+            info_dir=f"{self.data_dir}/train",
+            transform=transforms.Compose([transforms.Resize((64, 64)),])
+        )
+        self.val_traversal_dataset = self.dataset(
+            urls=f"{self.data_dir}/val/{shard_pattern}",
+            info_dir=f"{self.data_dir}/val",
+            transform=transforms.Compose([transforms.Resize((64, 64)),]),
+            shuffle=0
+        )
+        self.test_traversal_dataset = self.dataset(
+            urls=f"{self.data_dir}/test/{shard_pattern}",
+            info_dir=f"{self.data_dir}/test",
+            transform=transforms.Compose([transforms.Resize((64, 64)),]),
+            shuffle=0
+        )
+        self.train_subset = TraversalWebDatasetSubset(
+            self.train_traversal_dataset, n_shards=5
+        )
+        self.ood_test_dataset = self.dataset(
+            urls=f"{self.data_dir}/ood-test/{shard_pattern}",
+            info_dir=f"{self.data_dir}/ood-test",
+            transform=transforms.Compose([transforms.Resize((64, 64)),]),
+            shuffle=0
+        )
+
+        self.get_train = lambda batch_size, sampler=None: (
+            LabeledTraversalWebDataset(self.train_traversal_dataset, normalize_latents=self.normalize_latents).loader(
+                batch_size=batch_size,
+                num_workers=self.num_workers,
+            ), sampler)
+        self.get_validation = lambda batch_size, sampler=None: (
+            LabeledTraversalWebDataset(self.val_traversal_dataset, normalize_latents=self.normalize_latents).loader(
+                batch_size=batch_size,
+                num_workers=2,
+            ), sampler)
+        self.get_test = lambda batch_size, sampler=None: (
+            LabeledTraversalWebDataset(self.test_traversal_dataset, normalize_latents=self.normalize_latents).loader(
+                batch_size=batch_size,
+                num_workers=2,
+            ), sampler)
+        self.get_supervised_train = lambda batch_size, sampler=None: (
+            LabeledTraversalWebDataset(self.train_subset, normalize_latents=self.normalize_latents).loader(
+                batch_size=batch_size,
+                num_workers=2,
+            ), sampler)
+        self.get_supervised_validation = self.get_validation
+
+    def get_ood_test(self, batch_size, sampler=None):
+        """Get dataloader for out-of-distribution test data."""
+        return LabeledTraversalWebDataset(self.ood_test_dataset, normalize_latents=self.normalize_latents).loader(
+            batch_size=batch_size,
+            num_workers=2,
+        ), sampler
         

@@ -1,1 +1,1 @@
-LOSS_NAMES = ['pred', 'inv', 'supervised']
+LOSS_NAMES = ['pred', 'inv', 'supervised', 'rplvic', 'ilvic']

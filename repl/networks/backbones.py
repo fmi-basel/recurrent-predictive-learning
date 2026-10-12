@@ -1,6 +1,5 @@
-import torch
 from repl.networks.networks import EncoderNetwork
-from torchvision.models import resnet18
+from torchvision.models.resnet import BasicBlock
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
@@ -203,3 +202,86 @@ class Conv2dEncoder(EncoderNetwork):
             if self.max_pool_size is not None:
                 shape = (shape - self.max_pool_size[i]) // self.max_pool_size[i] + 1
         return int(shape)
+
+
+class CustomResNetEncoder(EncoderNetwork):
+    def __init__(self,encoded_dim=256, n_layers=4, n_blocks=[2, 2, 2, 2],
+                 n_channels=[32, 64, 128, 256], pool=[False, True, True, True],
+                 n_in_channels=3, kernel_size=3, use_batch_norm=True, 
+                 return_full_feature_map=False):
+        super(CustomResNetEncoder, self).__init__(encoded_dim=encoded_dim)
+
+        if len(n_blocks) == 1 and n_layers > 1:
+            n_blocks = n_blocks * n_layers
+        if len(n_channels) == 1 and n_layers > 1:
+            n_channels = n_channels * n_layers
+        if len(pool) == 1 and n_layers > 1:
+            pool = pool * n_layers
+
+        assert len(n_blocks) == n_layers, "Length of n_blocks must be equal to n_layers"
+        assert len(n_channels) == n_layers, "Length of n_channels must be equal to n_layers"
+        assert len(pool) == n_layers, "Length of pool must be equal to n_layers"
+
+        # convert elements in pool to boolean
+        pool = [bool(p) for p in pool]
+
+        self.n_layers = n_layers
+        self.n_blocks = n_blocks
+        self.n_channels = n_channels
+        self.pool = pool
+        self.n_in_channels = n_in_channels
+        self.kernel_size = kernel_size
+        self.use_batch_norm = use_batch_norm
+        self.full_feature_map = return_full_feature_map
+        self.downsample_factor = 2 ** np.sum(pool[:n_layers])
+
+        conv1 = nn.Conv2d(n_in_channels, n_channels[0], kernel_size=kernel_size, stride=1, padding=kernel_size//2)
+        bn1 = nn.BatchNorm2d(n_channels[0]) if use_batch_norm else nn.Identity()
+        relu = nn.ReLU(inplace=True)
+        self.backbone.add_module("conv1", conv1)
+        self.backbone.add_module("bn1", bn1)
+        self.backbone.add_module("relu", relu)
+
+        n_in_channels = n_channels[0]
+        for i in range(n_layers):
+            layer = self._make_layer(n_in_channels, n_channels[i], n_blocks[i], use_batch_norm, pool[i])
+            self.backbone.add_module(f"layer{i+1}", layer)
+            n_in_channels = n_channels[i]
+
+        if not return_full_feature_map:
+            self.backbone.add_module("avgpool", nn.AdaptiveAvgPool2d((1, 1)))
+
+    def _make_layer(self, n_in_channels, out_channels, blocks, use_batch_norm, pool):
+        in_channels = n_in_channels
+        layers = []
+        norm_layer = nn.BatchNorm2d if use_batch_norm else None
+        for i in range(blocks):
+            if i == 0 and pool:
+                downsample = nn.Sequential(
+                    nn.Conv2d(n_in_channels, out_channels, kernel_size=1, stride=2, bias=False),
+                    norm_layer(out_channels),
+                )
+                stride = 2
+            else:
+                downsample = nn.Identity()
+                stride = 1
+            layers.append(
+                BasicBlock(in_channels, out_channels, stride=stride,
+                           downsample=downsample, norm_layer=norm_layer)
+            )
+            in_channels = out_channels
+        return nn.Sequential(*layers)
+    
+    def forward(self, x):
+        # x is (B, L, C, H, W)
+        B, L, C, H, W = x.shape
+        # (B*L, C, H, W)
+        x = x.view(-1, C, H, W)
+        z = super().forward(x)
+        return z.view(B, L, *z.shape[1:])
+    
+    def get_output_spatial_shape(self, input_shape):
+        if self.full_feature_map:
+            return input_shape // self.downsample_factor
+        else:
+            return 1

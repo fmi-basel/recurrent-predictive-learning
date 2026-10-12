@@ -37,6 +37,10 @@ def add_encoder_args(parser):
     parser.add_argument("--enc_stride", type=size_tuple, nargs='+', default=None, help="stride of the encoder")
     parser.add_argument("--enc_padding", type=size_tuple, nargs='+', default=None, help="padding of the encoder")
     parser.add_argument("--enc_pool_size", type=size_tuple, nargs='+', default=None, help="pool kernel size of the encoder")
+    parser.add_argument("--resnet_n_channels", type=int, nargs='+', default=None, help="number of channels in the Custom ResNet encoder")
+    parser.add_argument("--resnet_n_blocks", type=int, nargs='+', default=None, help="number of blocks in the Custom ResNet encoder")
+    parser.add_argument("--resnet_pool", type=int, nargs='+', default=None, help="pooling for the Custom ResNet encoder")
+    parser.add_argument("--resnet_stem_kernel_size", type=int, default=3, help="kernel size of the stem convolution in the Custom ResNet encoder")
     parser.add_argument("--flatten_enc_output", action="store_true", help="flatten the output of the encoder")
     parser.add_argument("--use_bn", action="store_true", help="use batch normalization in the encoder")
     
@@ -69,7 +73,7 @@ def add_prediction_args(parser):
     parser.add_argument("--pred_steps", type=int, default=12, help="number of prediction steps")
     parser.add_argument("--dense_prediction", action="store_true", help="use dense prediction")
     parser.add_argument("--prediction_target", choices=["enc", "ctx", "pred"], default="enc", help="prediction target (encoder, context or predictor output)")
-    parser.add_argument("--pred_target_dim_override", type=int, default=0, help="override the output size of the predictor network (only used for inv loss)")
+    parser.add_argument("--pred_target_dim_override", type=int, default=0, help="override the output size of the predictor network (only used for inv and ILwVIC loss)")
 
 
 def add_predictor_args(parser):
@@ -114,6 +118,7 @@ def add_optimization_args(parser):
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="weight decay")
     parser.add_argument("--optimizer", choices=["adam", "sgd"], default="adam", help="optimizer to use")
     parser.add_argument("--use_scheduler", action="store_true", help="use scheduler")
+    parser.add_argument("--scheduler_warmup_epochs", type=int, default=10, help="number of warmup epochs for the scheduler")
 
 
 def add_training_args(parser):
@@ -138,6 +143,9 @@ def add_criterion_args(parser):
     parser.add_argument("--decorr_coef", type=float, default=10.0, help="decorrelation coefficient")
     parser.add_argument("--pred_loss_type", choices=["cosine", "l2"], default="l2", help="predictor loss type (only used for Pred loss)")
     parser.add_argument("--no_sg", action="store_true", help="do not use stop-gradient for the target network (only applies to non-contrastive SSL losses)")
+    parser.add_argument("--pull_coef_extra_reg", type=float, default=1.0, help="pull coefficient for extra regularization (only applies to ILwVIC loss)")
+    parser.add_argument("--push_coef_extra_reg", type=float, default=1.0, help="push coefficient for extra regularization (only applies to ILwVIC loss)")
+    parser.add_argument("--decorr_coef_extra_reg", type=float, default=1.0, help="decorrelation coefficient for extra regularization (only applies to ILwVIC loss)")
 
 
 def add_validation_args(parser):
@@ -180,7 +188,7 @@ def add_ddp_args(parser):
 
 
 def check_args(args):
-    assert not (args.distributed or args.distribute_data), "Distributed training currently not supported" # TODO
+    assert not (args.distributed or args.distribute_data), "Distributed training currently not supported"
     if args.dataset in ["mnist", "oddballs"]:
         if "online_task" in args:
             assert args.online_task == "multitask", "Multitask classification required for MNIST, animals and PFC Oddballs"
@@ -188,12 +196,15 @@ def check_args(args):
             assert args.offline_task == "multitask", "Multitask classification required for MNIST, animals and PFC Oddballs"
     if args.dataset in ["mnist"]:
         assert args.grayscale, "--grayscale argument required for MNIST dataset"
+    if hasattr(args, 'n_areas') and args.n_areas is not None:
+        assert args.encoder == "conv2d", "Greedy training is supported for Conv2D encoders"
     if "online_task" in args:
         if args.online_task == "multitask":
             assert args.evaluate_concat_features is False, "Concatenation over time is not supported for multitask classification"
         elif args.online_task == "seq2seq":
             assert args.evaluate_concat_features is False, "Concatenation of features over time cannot be used for seq2seq tasks"
     if "offline_task" in args:
+        assert args.dataset != "tlt12", "Please run offline evaluation on TLT12 dataset by following the instructions in the README file."
         if args.offline_task == "multitask":
             assert args.evaluate_concat_features is False, "Concatenation over time is not supported for multitask classification"
         elif args.offline_task == "seq2seq":
@@ -202,13 +213,13 @@ def check_args(args):
         print("Identity integrator is used. The encoder output will be fed as inputs to readouts.")
     if "loss" in args:
         if args.prediction_target == "pred":
-            assert args.loss == "inv", "Prediction target cannot be set to pred for losses other than Inv"
-        if args.loss not in ["supervised", "inv"]:
+            assert args.loss in ["inv", "ilvic"], "Prediction target cannot be set to pred for losses other than inv and ilvic"
+        if args.loss not in ["supervised", "inv", "ilvic"]:
             assert args.predictor is not None, f"{args.loss} loss requires a predictor"
-        if args.loss == "inv" and args.pred_target_dim_override == 0:
-            print("Output size of the predictor network should ideally be specified for Inv loss using --pred_target_dim_override. If not specified, the output size of the encoder will be used and will be unpredictable.")
+        if args.loss in ["inv", "ilvic"] and args.pred_target_dim_override == 0:
+            print("Output size of the predictor network should ideally be specified for inv and ilvic losses using --pred_target_dim_override. If not specified, the output size of the encoder will be used and will be unpredictable.")
     if args.pred_target_dim_override > 0 and "loss" in args:
-        assert args.loss == "inv", "Output size of the predictor network can be overriden only for Inv loss using --pred_target_dim_override"
+        assert args.loss in ["inv", "ilvic"], "Output size of the predictor network can be overriden only for inv and ilvic losses using --pred_target_dim_override"
     if args.flatten_images:
         assert args.dataset in ["mnist", "animals", "oddballs"], "Flattening images is only supported for MNIST, Animals and PFC Oddballs datasets"
     print("num_sequences is only used for MNIST datasets. For other datasets, it will be ignored.")

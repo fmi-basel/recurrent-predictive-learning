@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -57,7 +58,7 @@ def validate_offline(args,
         clf_val_acc5 = 0.0
 
     with torch.no_grad():
-        for x, y in tqdm(val_loader):
+        for x, y in tqdm(val_loader, disable=not sys.stdout.isatty()):
             x = x.to(device)
             if multitask:
                 y = tuple([yi.to(device) for yi in y])
@@ -158,7 +159,7 @@ def validate_offline(args,
 
 def get_readout_input_stats(loader, model, model_output_idx, device):
     stats = StatsRecorder(red_dims=(0, 1))
-    for x, _ in tqdm(loader):
+    for x, _ in tqdm(loader, disable=not sys.stdout.isatty()):
         x = x.to(device)
         with torch.no_grad():
             readout_input = model(x)[model_output_idx]
@@ -292,7 +293,7 @@ def offline_eval(args, model, num_classes, model_output_idx, seq_len, device, in
 
         train_acc = ({}, {}) if multitask else 0.
         train_r2 = ({}, {}) if multitask else 0.
-        for x, y in tqdm(train_loader):
+        for x, y in tqdm(train_loader, disable=not sys.stdout.isatty()):
             x = x.to(device)
             if multitask:
                 y = tuple([yi.to(device) for yi in y])
@@ -438,6 +439,10 @@ def main(args, device):
         enc_stride=args.enc_stride,
         enc_padding=args.enc_padding,
         enc_pool_size=args.enc_pool_size,
+        resnet_n_channels=args.resnet_n_channels,
+        resnet_n_blocks=args.resnet_n_blocks,
+        resnet_pool=args.resnet_pool,
+        resnet_stem_kernel_size=args.resnet_stem_kernel_size,
         preprocess=preprocess,
         postprocess=postprocess,
         state_dict=state_dict,

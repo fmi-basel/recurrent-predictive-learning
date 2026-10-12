@@ -4,3 +4,4 @@ for i in {1..3}; do
 done
 
 bash bash_scripts/mouse.sh --seed $i --experiment_name mouse_random_$i --loss supervised --freeze;
+bash bash_scripts/mouse.sh --seed $i --experiment_name mouse_supervised_$i --loss supervised;

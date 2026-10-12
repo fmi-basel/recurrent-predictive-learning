@@ -1,11 +1,10 @@
 from copy import deepcopy
 import torch
 import torch.nn as nn
-from repl.networks.backbones import CPCAudioEncoder, Conv2dEncoder, MLPEncoder
+from repl.networks.backbones import CPCAudioEncoder, Conv2dEncoder, CustomResNetEncoder, MLPEncoder
 from repl.networks.networks import (
     EncoderNetwork, 
     IdentityIntegrator,
-    IntegratorNetwork, 
     LinearPredictor, 
     MLPPredictor, 
     ReLULinearPredictor, 
@@ -29,7 +28,7 @@ def additional_data_process(dataset, flatten_enc_output=False):
 
     preprocess = None  # no preprocessing for the time being
 
-    if dataset in ["animals", "mnist", "oddballs", "mouse"]:
+    if dataset in ["animals", "mnist", "oddballs", "mouse", "tlt12"]:
         postprocess = FlattenConv() if flatten_enc_output else None
     else:
         postprocess = None
@@ -48,6 +47,10 @@ def setup_encoder(
         enc_stride=None, 
         enc_padding=None, 
         enc_pool_size=None,
+        resnet_n_channels=None,
+        resnet_n_blocks=None,
+        resnet_pool=None,
+        resnet_stem_kernel_size=3,
         return_full_features=False,
         is_frozen=False):
     f"""Setup encoder network.
@@ -84,6 +87,17 @@ def setup_encoder(
                                 padding=enc_padding,
                                 max_pool_size=enc_pool_size,
                                 return_full_feature_map=return_full_features)
+    elif kind == "resnet":
+        encoder = CustomResNetEncoder(
+            n_in_channels=n_in_channels,
+            n_channels=resnet_n_channels if resnet_n_channels is not None else [64, 128, 256, 512],
+            n_blocks=resnet_n_blocks if resnet_n_blocks is not None else [2, 2, 2, 2],
+            pool=resnet_pool if resnet_pool is not None else [False, True, True, True],
+            n_layers=enc_n_layers,
+            kernel_size=resnet_stem_kernel_size,
+            use_batch_norm=use_bn,
+            return_full_feature_map=return_full_features,
+        )
     else:
         raise NotImplementedError(f"Encoder {kind} not implemented")
     
@@ -209,6 +223,10 @@ def prepare_model(
         enc_stride=None,
         enc_padding=None,
         enc_pool_size=None,
+        resnet_n_channels=None,
+        resnet_n_blocks=None,
+        resnet_pool=None,
+        resnet_stem_kernel_size=3,
         preprocess=None,
         postprocess=None,
         state_dict=None,
@@ -253,7 +271,10 @@ def prepare_model(
     """
     if n_areas is None:  # normal RePL model with deep encoder
         encoder = setup_encoder(encoder_kind, input_size, n_in_channels, enc_dim, use_bn_enc, enc_n_layers,
-                                enc_kernel_size, enc_stride, enc_padding, enc_pool_size, return_full_features)
+                                enc_kernel_size, enc_stride, enc_padding, enc_pool_size,
+                                resnet_n_channels=resnet_n_channels, resnet_n_blocks=resnet_n_blocks,
+                                resnet_pool=resnet_pool, resnet_stem_kernel_size=resnet_stem_kernel_size,
+                                return_full_features=return_full_features)
         if flatten_enc_output:
             enc_dim *= encoder.get_output_spatial_shape(input_size)**2
 
@@ -298,7 +319,8 @@ def prepare_model(
             padding = [enc_padding[i]] if enc_padding is not None else None
             pool_size = [enc_pool_size[i]] if enc_pool_size is not None else None
             encoder_list.append(deepcopy(setup_encoder(encoder_kind, input_size, n_in_channels, enc_dim[i], use_bn_enc, enc_n_layers,
-                                              kernel_size, stride, padding, pool_size, return_full_features, is_frozen=frozen_areas[i])))
+                                              kernel_size, stride, padding, pool_size, return_full_features=return_full_features, 
+                                              is_frozen=frozen_areas[i])))
             if flatten_enc_output:
                 enc_spatial_shape = encoder_list[i].get_output_spatial_shape(enc_spatial_shape)
                 integrator_in_dim = enc_dim[i] * enc_spatial_shape **2

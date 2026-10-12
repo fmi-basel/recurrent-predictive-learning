@@ -1,5 +1,8 @@
 import numpy as np
-from repl.modules.utils import compute_score_bilinear, compute_cosine_similarity, get_subsamples
+from repl.modules.utils import (
+    compute_score_bilinear, compute_cosine_similarity, get_subsamples,
+    vc_regularization_loss, symmetric_invariance_loss
+)
 import torch
 import torch.nn as nn
 
@@ -17,6 +20,144 @@ class Criterion(nn.Module):
     def __init__(self, pred_steps):
         super(Criterion, self).__init__()
         self.pred_steps = pred_steps
+
+
+# Credit: https://github.com/Spijkervet/contrastive-predictive-coding/
+class InfoNCE(Criterion):
+    """InfoNCE loss function
+
+    Args:
+        pred_steps (int): Number of prediction steps
+        negative_samples (int): Number of negative samples to use
+        discount_factor (float): Discount factor for future predictions
+        dense_prediction (bool): Whether to use dense prediction or not
+
+
+    Attributes:
+        pred_steps (int): Number of prediction steps
+        negative_samples (int): Number of negative samples to use
+        discount_factor (float): Discount factor for future predictions
+        dense_prediction (bool): Whether to use dense prediction or not
+
+    Notes:
+        The `forward` method expects the following inputs:
+        - pred: Predictions from the encoder network (B, L, C*pred_steps)
+        - z: Encoded representation from the encoder network (B, L, C) or the output of the integrator network (B, L, C)
+    """
+
+    def __init__(
+        self,
+        pred_steps,
+        negative_samples=10,
+        discount_factor=0.0,
+        dense_prediction=False,
+        no_sg=True,
+    ):
+        super(InfoNCE, self).__init__(pred_steps=pred_steps)
+
+        self.negative_samples = negative_samples
+        self.loss_fn = nn.LogSoftmax(dim=1)
+        self.pred_steps = pred_steps
+        self.discount_factor = discount_factor
+        self.dense_prediction = dense_prediction
+        self.no_sg = no_sg
+
+    def forward(self, z, pred):
+        if z.dim() == 5:
+            # flatten the last few dimensions of z if it is not already in (B, L, C) format
+            z = z.view(z.shape[0], z.shape[1], -1)
+            pred = pred.view(pred.shape[0], pred.shape[1], -1)
+
+        batch_size = z.shape[0]
+        seq_len = z.shape[1]
+        encoded_dim = z.shape[2]
+        total_loss = 0
+
+        # z_neg.shape: (B, L, C, num_samples)
+        z_neg = self.get_negative_samples(z, self.negative_samples)
+
+        z, pred = get_subsamples(z, pred, self.pred_steps + 1)
+        L = z.shape[1]
+
+        for k in range(1, self.pred_steps + 1):
+            z_k = z[:, k:, :]  # (B, L, C) -> (B, L-k, C)
+
+            if self.dense_prediction:
+                # (B, L, C*pred_steps) -> (B, L-k, C)
+                pred_k = pred[:, :-k, (k - 1) * encoded_dim : k * encoded_dim]
+
+                # (B, L, C*pred_steps) -> (B, L-k, C)
+                bootstrap_targets = self.discount_factor * pred[:, k:, (k - 1) * encoded_dim : k * encoded_dim]
+            else:
+                # select the last prediction step only, otherwise skip the current iteration
+                if k == self.pred_steps:
+                    # (B, L, C) -> (B, L-k, C)
+                    pred_k = pred[:, :-k, :]
+
+                    # (B, L, C) -> (B, L-k, C)
+                    bootstrap_targets = self.discount_factor * pred[:, k:, :]
+                else:
+                    continue
+
+            z_neg_k = z_neg[:, : pred_k.shape[1], :, :]
+
+            targets = z_k + bootstrap_targets.detach()
+
+            # pos_samples_f.shape: (B, L, 1)
+            if self.no_sg:
+                pos_samples_f = compute_score_bilinear(targets.unsqueeze(3), pred_k)
+            else:
+                pos_samples_f = compute_score_bilinear(targets.unsqueeze(3).detach(), pred_k)
+
+            # neg_samples_f.shape: (B, L, num_samples)
+            neg_samples_f = compute_score_bilinear(z_neg_k, pred_k)
+
+            # (B, L, num_samples+1) -> (B*L, num_samples+1)
+            results = torch.cat((pos_samples_f, neg_samples_f), dim=2).view(-1, self.negative_samples + 1)
+
+            # loss.shape: (B*L,)
+            loss = self.loss_fn(results)[:, 0]  # (B*L, num_samples+1) -> (B*L,) [index 0 is the positive sample]
+
+            total_samples = (seq_len - k) * batch_size
+            loss = -loss.sum() / total_samples
+            total_loss += loss
+
+        total_loss /= self.pred_steps
+
+        return total_loss
+
+    @staticmethod
+    def get_negative_samples(z, num_samples):
+        """Get negative samples for InfoNCE loss. This is done by randomly permuting the input tensor.
+
+        Args:
+            z (torch.Tensor): Encoded representation from the encoder network of shape (B, L, C)
+            num_samples (int): Number of negative samples to use
+
+        Returns:
+            torch.Tensor: Negative samples of shape (B, L, C, num_samples)
+        """
+        z_full = z.reshape(-1, z.shape[2])  # (B, L, C) -> (B*L, C)
+
+        # Generate num_samples random permutations of z to use as negative samples
+        device = z_full.get_device()
+        if device == -1:
+            device = "cpu"
+        z_neg = torch.stack(
+            [
+                torch.index_select(
+                    z_full,
+                    dim=0,
+                    index=torch.randperm(z_full.shape[0]).to(device),
+                )
+                for _ in range(num_samples)
+            ],
+            dim=2,
+        )
+
+        # (B*L, C, num_samples) -> (B, L, C, num_samples)
+        z_neg = z_neg.view(z.shape[0], z.shape[1], z.shape[2], num_samples)
+        return z_neg
 
 
 class PredLoss(Criterion):
@@ -305,3 +446,127 @@ class SupervisedLoss(nn.Module):
             else:
                 logits = self.readout(data)
             return self.loss_fn(logits, labels)
+
+
+class RPLwVICRegLoss(PredLoss):
+    """RPL loss with VICReg regularization
+
+    Args:
+        pred_steps (int): Number of prediction steps
+        pull_coef (float): Pull loss coefficient
+        push_coef (float): Push loss coefficient
+        decorr_coef (float): Decorrelation loss coefficient
+        dense_prediction (bool): Whether to use dense prediction or not
+        n_skip (int): Number of time steps to skip for invariance loss
+        delta_gamma (float): Discount factor for invariance loss
+    """
+    def __init__(
+            self, 
+            pred_steps, 
+            pull_coef=1.0, 
+            push_coef=1.0, 
+            decorr_coef=10.0,
+            dense_prediction=False,
+            n_skip=1,
+            delta_gamma=1.0,):
+        
+        super().__init__(
+            pred_steps=pred_steps,
+            discount_factor=0.0,
+            dense_prediction=dense_prediction,
+            pred_loss_type='l2',
+            no_sg=False
+        )
+        
+        self.pull_coef = pull_coef
+        self.push_coef = push_coef
+        self.decorr_coef = decorr_coef
+        self.deltas = [pred_steps] if not dense_prediction else list(range(1, pred_steps + 1))
+        self.n_skip = n_skip
+        self.delta_gamma = delta_gamma
+    
+    def forward(self, z, pred):
+        # z.shape: (B, L, C)
+        # flatten the last few dimensions of z if it is not already in (B, L, C) format
+        if len(z.shape) == 5:
+            z = z.mean(dim=-1).mean(dim=-1)
+        B, L, C = z.shape
+        z_flat = z.view(B * L, C)
+
+        reg_loss  = vc_regularization_loss(z_flat, var_coef=self.push_coef, cov_coef=self.decorr_coef)
+        inv_loss  = self.pull_coef * symmetric_invariance_loss(z,
+                                                               deltas=self.deltas,
+                                                               n_skip=self.n_skip,
+                                                               delta_gamma=self.delta_gamma)
+
+        vicreg_loss = reg_loss + inv_loss
+        rpl_loss = super().forward(z, pred)
+        total_loss = vicreg_loss + rpl_loss
+        return total_loss
+
+
+class ILwVICRegLoss(InvLoss):
+    """Invariance loss with VICReg regularization
+
+    Args:
+        pred_steps (int): Number of prediction steps
+        pull_coef (float): Pull loss coefficient
+        push_coef (float): Push loss coefficient
+        decorr_coef (float): Decorrelation loss coefficient
+        dense_prediction (bool): Whether to use dense prediction or not
+        n_skip (int): Number of time steps to skip for invariance loss
+        delta_gamma (float): Discount factor for invariance loss
+    """
+    def __init__(
+            self, 
+            pred_steps, 
+            pull_coef=1.0, 
+            push_coef=1.0, 
+            decorr_coef=10.0,
+            pull_coef_vic=1.0,
+            push_coef_vic=1.0,
+            decorr_coef_vic=10.0,
+            discount_factor=0.0,
+            reg_dim="batch",
+            dense_prediction=False,
+            no_sg=False,
+            n_skip=1,
+            delta_gamma=1.0):
+        
+        super().__init__(
+            pred_steps=pred_steps,
+            pull_coef=pull_coef,
+            push_coef=push_coef,
+            decorr_coef=decorr_coef,
+            discount_factor=discount_factor,
+            reg_dim=reg_dim,
+            dense_prediction=dense_prediction,
+            no_sg=no_sg
+        )
+
+        self.pull_coef_vic = pull_coef_vic
+        self.push_coef_vic = push_coef_vic
+        self.decorr_coef_vic = decorr_coef_vic
+        self.deltas = [pred_steps] if not dense_prediction else list(range(1, pred_steps + 1))
+        self.n_skip = n_skip
+        self.delta_gamma = delta_gamma
+    
+    def forward(self, z, pred):
+        # z.shape: (B, L, C)
+        # flatten the last few dimensions of z if it is not already in (B, L, C) format
+        if len(z.shape) == 5:
+            z = z.mean(dim=-1).mean(dim=-1)
+        B, L, C = z.shape
+        z_flat = z.view(B * L, C)
+
+        reg_loss  = vc_regularization_loss(z_flat, var_coef=self.push_coef_vic, cov_coef=self.decorr_coef_vic)
+        inv_loss  = self.pull_coef_vic * symmetric_invariance_loss(z,
+                                                                   deltas=self.deltas,
+                                                                   n_skip=self.n_skip,
+                                                                   delta_gamma=self.delta_gamma)
+
+        vicreg_loss = reg_loss + inv_loss
+        il_loss = super().forward(pred)
+
+        total_loss = vicreg_loss + il_loss
+        return total_loss

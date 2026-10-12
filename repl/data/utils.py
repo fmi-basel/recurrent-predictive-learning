@@ -149,3 +149,20 @@ class DistributedProxySampler(torch.utils.data.distributed.DistributedSampler):
             raise RuntimeError("{} vs {}".format(len(indices), self.num_samples))
 
         return iter(indices)
+    
+
+class CustomSampler(torch.utils.data.Sampler[int]):
+    def __init__(self, data_source):
+        self.data_source = data_source
+        self.skip_ctr = 0
+
+    def skip(self, n):
+        self.skip_ctr = n
+
+    def __iter__(self):
+        n = len(self.data_source)
+        for i in range(self.skip_ctr, n):
+            yield i
+
+    def __len__(self):
+        return len(self.data_source) - self.skip_ctr

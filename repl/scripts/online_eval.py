@@ -1,3 +1,5 @@
+import sys
+
 import torch
 import torch.distributed as dist
 from tqdm.auto import tqdm
@@ -58,9 +60,10 @@ def online_eval(args,
         classifier_acc5 = 0.
     part_ratio = 0.
     part_ratio_context = 0.
-    zs = []
-    ctxs = []
-    for x, y in tqdm(test_loader):
+    # Welford online accumulators for z_var and ctx_var (avoids storing all GPU tensors) written by mshalvagal using Claude
+    _wf = {k: {'n': 0, 'mean': 0.0, 'M2': 0.0, 'vt_sum': 0.0, 'vt_n': 0}
+           for k in ('z', 'ctx')}
+    for x, y in tqdm(test_loader, disable=not sys.stdout.isatty()):
         x = x.to(device)
         if multitask:
             y = tuple([yi.to(device) for yi in y])
@@ -120,20 +123,34 @@ def online_eval(args,
                 classifier_acc5 += classifier_acc5_/len(test_loader)
 
             part_ratio += participation_ratio(z) if not args.flatten_enc_output else 0.
-            part_ratio_context += participation_ratio(context)
+            try:
+                part_ratio_context += participation_ratio(context)
+            except:
+                part_ratio_context = -1.
             if len(z.shape) == 5:
                 z = z.mean(-1).mean(-1)
             if len(context.shape) == 5:
                 context = context.mean(-1).mean(-1)
-            zs.append(z)
-            ctxs.append(context)
+            for key, t in (('z', z), ('ctx', context)):
+                t_f = t.float()
+                n_new = t_f.numel()
+                mean_new = t_f.mean().item()
+                M2_new = t_f.var(unbiased=False).item() * n_new
+                # Chan et al. parallel merge
+                n_old = _wf[key]['n']
+                delta = mean_new - _wf[key]['mean']
+                n_total = n_old + n_new
+                _wf[key]['mean'] += delta * n_new / n_total
+                _wf[key]['M2']   += M2_new + delta**2 * n_old * n_new / n_total
+                _wf[key]['n']     = n_total
+                # running mean of per-sequence variance over time (dim=1)
+                _wf[key]['vt_sum'] += t_f.var(dim=1).sum().item()
+                _wf[key]['vt_n']   += t_f.shape[0] * t_f.shape[-1]
     if args.online_task != "seq2seq" and not (args.online_full_spatial_readout and args.flatten_enc_output):
-        z = torch.cat(zs, dim=0)
-        z_var = torch.var(z)
-        avg_var_over_time = torch.var(z, dim=1).mean()
-        ctx = torch.cat(ctxs, dim=0)
-        ctx_var = torch.var(ctx)
-        avg_var_over_time_ctx = torch.var(ctx, dim=1).mean()
+        z_var             = _wf['z']['M2']   / (_wf['z']['n']   - 1)
+        avg_var_over_time = _wf['z']['vt_sum']  / _wf['z']['vt_n']
+        ctx_var               = _wf['ctx']['M2']  / (_wf['ctx']['n']  - 1)
+        avg_var_over_time_ctx = _wf['ctx']['vt_sum'] / _wf['ctx']['vt_n']
     else:
         z_var = None
         avg_var_over_time = None
@@ -172,7 +189,7 @@ def online_eval(args,
         _ = log_variable(avg_var_over_time_ctx, "Avg. variance ctx. over time (val.)", commit=False)
         part_ratio_log = log_variable(part_ratio, "Part. ratio act. (val.)")
         _ = log_variable(part_ratio_context, "Part. ratio ctx. (val.)")
-        if args.loss == "inv":
+        if args.loss in ["inv", "ilvic"]:
             _ = log_variable(criterion.pull_loss_val, "Pull loss (val.)", commit=False)
             _ = log_variable(criterion.push_loss_val, "Push loss (val.)", commit=False)
             _ = log_variable(criterion.decorr_loss_val, "Decorrelation loss (val.)", commit=False)
@@ -247,7 +264,7 @@ def greedy_online_eval(
     part_ratio_context = torch.zeros(n_areas)
     vars_act = torch.zeros(n_areas)
     vars_ctx = torch.zeros(n_areas)
-    for x, y in tqdm(test_loader):
+    for x, y in tqdm(test_loader, disable=not sys.stdout.isatty()):
         x = x.to(device)
         if multitask:
             y = tuple([yi.to(device) for yi in y])

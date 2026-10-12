@@ -6,9 +6,10 @@ import torch.distributed as dist
 import wandb
 
 from repl.data.audio_dataloader import LibriDataLoader
-from repl.data.image_dataloader import MouseVideoDataLoader, ImageSequencesDataLoader, SpriteVideoDataLoader
+from repl.data.image_dataloader import MouseVideoDataLoader, ImageSequencesDataLoader, SpriteVideoDataLoader, TLT12DataLoader
 from repl.data._valid_names_lists import DATASET_NAMES
-from repl.modules.criterion import PredLoss, InvLoss, SupervisedLoss
+from repl.data.tlt12_wds import CIRCULAR_LATENT_INDICES
+from repl.modules.criterion import PredLoss, InvLoss, ILwVICRegLoss, RPLwVICRegLoss, SupervisedLoss
 from repl.modules.utils import LinearWarmupCosineAnnealingLR
 
 
@@ -73,6 +74,25 @@ def get_data_specs(dataset,
             "orientation (dsc)": 36,
         }
         num_classes = ({}, dscrt_num_classes, {}, {key: 1 for key in keys})
+    elif dataset == "tlt12":
+        input_size = 64 * 64 * 3 if flatten_images else 64
+        latent_names = ["rot_x", "rot_y", "rot_z",
+                        "floor_hue", "spot_theta", "spot_phi", "spot_hue",
+                        "trans_x", "trans_y", "trans_z"]
+        seq_num_classes = {"synset": 12}
+        cts_dense = {name: 1 for name in latent_names}
+        for i in CIRCULAR_LATENT_INDICES:
+            name = latent_names[i]
+            cts_dense[f"{name}_sin"] = 1
+            cts_dense[f"{name}_cos"] = 1
+        cts_dense.update({f"{name}_delta": 1 for name in latent_names})
+        cts_dense.update({"w": 1, "x": 1, "y": 1, "z": 1})  # quaternions for rotation
+        num_classes = (
+            seq_num_classes,
+            {},
+            {},
+            cts_dense,
+        )
     else:
         raise Exception("Invalid dataset")
     return input_size, num_classes
@@ -215,6 +235,15 @@ def prepare_data(
         train_loader, train_sampler = dataloader.get_train(batch_size)
         val_loader, val_sampler = dataloader.get_validation(val_batch_size)
         test_loader, test_sampler = dataloader.get_test(val_batch_size)
+    elif dataset == "tlt12":
+        dataloader = TLT12DataLoader(
+            data_dir=data_input_dir,
+            num_workers=num_workers,
+            distributed=distributed,
+        )
+        train_loader, train_sampler = dataloader.get_train(batch_size)
+        val_loader, val_sampler     = dataloader.get_validation(val_batch_size)
+        test_loader, test_sampler   = dataloader.get_test(val_batch_size)
     else:
         raise Exception("Invalid dataset")
 
@@ -261,12 +290,14 @@ def get_criterion_input(z, context, pred, y, loss, downstream_input, prediction_
         elif prediction_target == "ctx":
             pred_target = context
         elif prediction_target == "pred":
-            assert loss == "inv", "Prediction target 'pred' is only valid for inv loss"
+            assert loss in ["inv", "ilvic"], "Prediction target 'pred' is only valid for inv and ilvic losses"
             pred_target = pred
         else:
             raise ValueError(f"Invalid prediction target: {prediction_target}")
         if loss == "inv":
             return (pred_target,)
+        elif loss == "ilvic":
+            return z, pred
         else:
             return pred_target, pred
 
@@ -284,7 +315,11 @@ def prepare_criterion(
         dense_prediction=False,
         pred_loss_type="cosine",
         full_spatial_readout=False,
-        no_sg=False):
+        no_sg=False,
+        pull_coef_extra_reg=1.0,
+        push_coef_extra_reg=1.0,
+        decorr_coef_extra_reg=1.0
+        ):
     """Prepare the loss function (criterion)
 
     Args:
@@ -318,6 +353,23 @@ def prepare_criterion(
                             reg_dim=regularize_over,
                             dense_prediction=dense_prediction,
                             no_sg=no_sg)
+    elif loss == "rplvic":
+        criterion = RPLwVICRegLoss(pred_steps=pred_steps,
+                                   pull_coef=pull_coef,
+                                   push_coef=push_coef,
+                                   decorr_coef=decorr_coef,
+                                   dense_prediction=dense_prediction)
+    elif loss == "ilvic":
+        criterion = ILwVICRegLoss(pred_steps=pred_steps,
+                                  pull_coef=pull_coef,
+                                  push_coef=push_coef,
+                                  decorr_coef=decorr_coef,
+                                  pull_coef_vic=pull_coef_extra_reg,
+                                  push_coef_vic=push_coef_extra_reg,
+                                  decorr_coef_vic=decorr_coef_extra_reg,
+                                  reg_dim=regularize_over,
+                                  dense_prediction=dense_prediction,
+                                  no_sg=no_sg)
     elif loss == "supervised":
         criterion = SupervisedLoss(readout=readout, task=classification_task, full_spatial_readout=full_spatial_readout)
     else:
@@ -331,6 +383,7 @@ def prepare_model_optimization(
         readout,
         optimizer,
         use_scheduler,
+        scheduler_warmup_epochs,
         epochs,
         lr,
         weight_decay,
@@ -383,9 +436,8 @@ def prepare_model_optimization(
     elif optimizer == "sgd":
         optimizer = torch.optim.SGD(model_params)
     
-    # set up scheduler TODO: disable scheduler for readout
     if use_scheduler:
-        scheduler = LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=10, max_epochs=epochs)
+        scheduler = LinearWarmupCosineAnnealingLR(optimizer, warmup_epochs=scheduler_warmup_epochs, max_epochs=epochs)
     else:
         scheduler = None
 

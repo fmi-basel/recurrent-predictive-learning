@@ -62,6 +62,34 @@ def compute_cosine_similarity(z, pred):
     return scores
 
 
+def symmetric_invariance_loss(z, deltas, n_skip=1, delta_gamma=1.0):
+    min_d  = min(deltas)
+    raw_w  = [delta_gamma ** (d - min_d) for d in deltas]
+    norm_w = [w / sum(raw_w) for w in raw_w]
+
+    per_delta = []
+    for delta, w in zip(deltas, norm_w):
+        z_t      = z[:, n_skip:-delta]       # [B, T', z_dim]
+        z_future = z[:, n_skip + delta:]     # [B, T', z_dim]
+        per_delta.append(w * (z_t - z_future).pow(2).mean())
+    return torch.stack(per_delta).sum()
+
+
+def vc_regularization_loss(z, var_coef=1.0, cov_coef=10.0):
+    # z.shape: (B*L, C)
+    N, C = z.shape
+    var = z.var(dim=0) + 1e-4  # [C]
+    var_loss = -var_coef / C * var.log().mean()
+
+    # Covariance term: decorrelate features
+    z_centered = z - z.mean(dim=0, keepdim=True)
+    cov = (z_centered.T @ z_centered) / (N - 1)  # [C, C]
+    off_diag_mask = ~torch.eye(C, dtype=torch.bool, device=z.device)
+    cov_loss = cov_coef / C * cov[off_diag_mask].pow(2).mean()
+
+    return var_loss + cov_loss
+
+
 # Code from https://github.com/Lightning-Universe/lightning-bolts/blob/9ae0581776ddfef4d9ccc2f3709499d00e22be2e/src/pl_bolts/optimizers/lr_scheduler.py
 class LinearWarmupCosineAnnealingLR(_LRScheduler):
     """Sets the learning rate of each parameter group to follow a linear warmup schedule between warmup_start_lr

@@ -1,6 +1,7 @@
 import argparse
 from copy import deepcopy
 import os
+import sys
 
 import torch
 import torch.distributed as dist
@@ -118,6 +119,10 @@ def main(args, device):
         enc_stride=args.enc_stride,
         enc_padding=args.enc_padding,
         enc_pool_size=args.enc_pool_size,
+        resnet_n_channels=args.resnet_n_channels,
+        resnet_n_blocks=args.resnet_n_blocks,
+        resnet_pool=args.resnet_pool,
+        resnet_stem_kernel_size=args.resnet_stem_kernel_size,
         preprocess=preprocess,
         postprocess=postprocess,
         return_full_features=args.online_full_spatial_readout,
@@ -156,6 +161,9 @@ def main(args, device):
         pred_loss_type=args.pred_loss_type,
         full_spatial_readout=args.online_full_spatial_readout,
         no_sg=args.no_sg,
+        pull_coef_extra_reg=args.pull_coef_extra_reg,
+        push_coef_extra_reg=args.push_coef_extra_reg,
+        decorr_coef_extra_reg=args.decorr_coef_extra_reg
     )
     classifier_criterion = torch.nn.CrossEntropyLoss(ignore_index=-1)
     regression_criterion = torch.nn.MSELoss()
@@ -168,7 +176,8 @@ def main(args, device):
         model_output_idx = 2
 
     optimizer, scheduler = prepare_model_optimization(
-        model=model, readout=readout, optimizer=args.optimizer, use_scheduler=args.use_scheduler, epochs=args.epochs,
+        model=model, readout=readout, optimizer=args.optimizer, use_scheduler=args.use_scheduler,
+        scheduler_warmup_epochs=args.scheduler_warmup_epochs, epochs=args.epochs,
         lr=args.lr, weight_decay=args.weight_decay, pred_lr_mult=args.pred_lr_mult, online_lr=args.online_lr,
         online_weight_decay=args.online_weight_decay, criterion=criterion
     )
@@ -237,7 +246,7 @@ def main(args, device):
                     num_regression_dense_targets=num_regression_dense_targets)
 
         # train
-        for i, (x, y) in enumerate(tqdm(train_loader)):
+        for i, (x, y) in enumerate(tqdm(train_loader, disable=not sys.stdout.isatty())):
             # move to device
             x = x.to(device)
             if multitask:
@@ -321,13 +330,14 @@ def main(args, device):
                 log_variable(torch.linalg.vector_norm(context, dim=vector_dims).mean(), "Context norm", commit=False)
                 log_variable(torch.linalg.vector_norm(pred, dim=vector_dims).mean(), "Pred. norm", commit=False)
                 log_variable(torch.var(z), "Variance act.")
-                if args.loss == "inv":
+                if args.loss in ["inv", "ilvic"]:
                     log_variable(criterion.pull_loss_val, "Pull loss (train)", commit=False)
                     log_variable(criterion.push_loss_val, "Push loss (train)", commit=False)
                     log_variable(criterion.decorr_loss_val, "Decorr loss (train)", commit=False)
     
     # save final model
     if dist.get_rank() == 0 and args.checkpoint_dir is not None:
+        torch.cuda.synchronize() # wait for all processes to finish before saving
         torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"model_final.pt"))
         torch.save(optimizer.state_dict(), os.path.join(checkpoint_dir, f"optimizer_final.pt"))
         if args.save_online_readout:

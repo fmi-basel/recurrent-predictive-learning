@@ -1,0 +1,24 @@
+torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 repl/scripts/cli.py \
+    --dataset tlt12 \
+    --seq_len 32 \
+    --encoder resnet \
+    --enc_n_layers 4 \
+    --resnet_n_channels 32 64 128 256 \
+    --resnet_n_blocks 2 2 2 2 \
+    --resnet_pool 0 1 1 1 \
+    --enc_output_dim 256 \
+    --use_bn \
+    --integrator lstm \
+    --ctx_dim 256 \
+    --predictor mlp \
+    --pred_hidden_dim 1024 \
+    --pred_n_hidden_layers 1 \
+    --lr 3e-4 \
+    --weight_decay 1e-5 \
+    --batch_size 128 \
+    --num_workers 12 \
+    --flatten_enc_output \
+    --online_task multitask \
+    --online_input ctx \
+    --val_batch_size 128 \
+    --save_online_readout $@
